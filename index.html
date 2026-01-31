@@ -1,0 +1,452 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dual Hand Particle System</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #050505;
+            font-family: 'Courier New', sans-serif;
+        }
+
+        canvas {
+            display: block;
+        }
+
+        #loading {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: #00ffcc;
+            font-size: 24px;
+            pointer-events: none;
+            text-align: center;
+            text-shadow: 0 0 10px #00ffcc;
+        }
+
+        #ui {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            color: white;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 15px;
+            border-radius: 8px;
+            pointer-events: none;
+            user-select: none;
+            width: 260px;
+            border: 1px solid #333;
+        }
+
+        .instruction {
+            margin-bottom: 8px;
+            font-size: 13px;
+            display: flex;
+            justify-content: space-between;
+        }
+
+        .key {
+            color: #00ffcc;
+            font-weight: bold;
+        }
+
+        .section-title {
+            color: #888;
+            font-size: 11px;
+            margin-top: 10px;
+            margin-bottom: 5px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .status {
+            margin-top: 15px;
+            padding-top: 10px;
+            border-top: 1px solid #555;
+            font-size: 12px;
+            color: #aaa;
+        }
+
+        #activeMode {
+            color: #ff0066;
+            font-weight: bold;
+            margin-left: 5px;
+            text-shadow: 0 0 5px #ff0066;
+        }
+
+        video {
+            display: none;
+        }
+    </style>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js"
+        crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"
+        crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+</head>
+
+<body>
+
+    <div id="loading">Initialize Dual Core...<br><span style="font-size:14px; color:#aaa">Allow camera access</span>
+    </div>
+
+    <div id="ui">
+        <div class="section-title">One Hand</div>
+        <div class="instruction"><span class="key">Move</span> <span>Rotate</span></div>
+        <div class="instruction"><span class="key">Pinch 👌</span> <span>Implode</span></div>
+        <div class="instruction"><span class="key">Fist ✊</span> <span>Explode</span></div>
+        <div class="instruction"><span class="key">Peace ✌️</span> <span>Next Shape</span></div>
+
+        <div class="section-title">Two Hands</div>
+        <div class="instruction"><span class="key">Apart/Close 👐</span> <span>Scale Size</span></div>
+        <div class="instruction"><span class="key">Dual Point ☝️☝️</span> <span>Split Cloud</span></div>
+
+        <div class="status">
+            Shape: <span id="shapeName" style="color:white">Sphere</span><br>
+            Mode: <span id="activeMode">Idle</span>
+        </div>
+    </div>
+
+    <video id="input_video"></video>
+
+    <script>
+
+        const PARTICLE_COUNT = 6000;
+        const PARTICLE_SIZE = 0.14;
+        const COLORS = [0x00ffcc, 0xff0066, 0x4488ff, 0xffaa00, 0xcc00ff];
+
+
+        let currentShapeIndex = 0;
+        let isPeaceSignLocked = false;
+        let lastGestureTime = 0;
+
+
+        let state = {
+            rotation: { x: 0, y: 0 },
+            pinchStrength: 0,
+            isFist: false,
+            isDualPointing: false,
+            hand1Pos: new THREE.Vector3(),
+            hand2Pos: new THREE.Vector3(),
+            handDistance: 1.0,
+            handsDetected: 0
+        };
+
+
+        const scene = new THREE.Scene();
+        scene.fog = new THREE.FogExp2(0x050505, 0.025);
+
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        camera.position.z = 20;
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(window.devicePixelRatio);
+        document.body.appendChild(renderer.domElement);
+
+
+        const geometry = new THREE.BufferGeometry();
+        const positions = new Float32Array(PARTICLE_COUNT * 3);
+        const targetPositions = new Float32Array(PARTICLE_COUNT * 3);
+        const colors = new Float32Array(PARTICLE_COUNT * 3);
+        const originalColors = new Float32Array(PARTICLE_COUNT * 3);
+
+        for (let i = 0; i < PARTICLE_COUNT; i++) {
+            positions[i * 3] = (Math.random() - 0.5) * 50;
+            positions[i * 3 + 1] = (Math.random() - 0.5) * 50;
+            positions[i * 3 + 2] = (Math.random() - 0.5) * 50;
+
+            const c = new THREE.Color(COLORS[Math.floor(Math.random() * COLORS.length)]);
+            colors[i * 3] = c.r; colors[i * 3 + 1] = c.g; colors[i * 3 + 2] = c.b;
+            originalColors[i * 3] = c.r; originalColors[i * 3 + 1] = c.g; originalColors[i * 3 + 2] = c.b;
+        }
+
+        geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+        geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
+        const material = new THREE.PointsMaterial({
+            size: PARTICLE_SIZE, vertexColors: true, blending: THREE.AdditiveBlending,
+            depthWrite: false, transparent: true, opacity: 0.8
+        });
+        const particleSystem = new THREE.Points(geometry, material);
+        scene.add(particleSystem);
+
+        const shapeGenerators = [
+            { name: "Sphere", func: getSpherePoint },
+            { name: "DNA Double Helix", func: getDNAPoint },
+            { name: "Spiral Galaxy", func: getGalaxyPoint },
+            { name: "Hyper Cube", func: getCubePoint },
+            { name: "Love Heart", func: getHeartPoint },
+            { name: "Saturn Rings", func: getSaturnPoint }
+        ];
+
+        function setShape(index) {
+            const shapeFunc = shapeGenerators[index].func;
+            document.getElementById('shapeName').innerText = shapeGenerators[index].name;
+            for (let i = 0; i < PARTICLE_COUNT; i++) {
+                const p = shapeFunc(i, PARTICLE_COUNT);
+                targetPositions[i * 3] = p.x;
+                targetPositions[i * 3 + 1] = p.y;
+                targetPositions[i * 3 + 2] = p.z;
+            }
+        }
+        setShape(0);
+
+        function getSpherePoint(i, count) {
+            const phi = Math.acos(-1 + (2 * i) / count);
+            const theta = Math.sqrt(count * Math.PI) * phi;
+            const r = 8;
+            return { x: r * Math.cos(theta) * Math.sin(phi), y: r * Math.sin(theta) * Math.sin(phi), z: r * Math.cos(phi) };
+        }
+        function getDNAPoint(i, count) {
+            const strand = i % 2 === 0 ? 1 : -1;
+            const t = (i / count) * Math.PI * 8;
+            const y = (i / count) * 24 - 12;
+            const r = 5;
+            return { x: r * Math.cos(t + strand * Math.PI), y: y, z: r * Math.sin(t + strand * Math.PI) };
+        }
+        function getGalaxyPoint(i, count) {
+            const arm = i % 3;
+            const t = (i / count) * Math.PI * 4;
+            const r = (i / count) * 14;
+            const x = r * Math.cos(t + arm * 2);
+            const z = r * Math.sin(t + arm * 2);
+            const y = (Math.random() - 0.5) * (12 - r) * 0.5;
+            return { x, y, z };
+        }
+        function getCubePoint(i, count) {
+            const side = 12;
+            const face = Math.floor(Math.random() * 6);
+            let x, y, z;
+            const u = (Math.random() - 0.5) * side;
+            const v = (Math.random() - 0.5) * side;
+            const w = side / 2;
+            if (face === 0) { x = w; y = u; z = v; } else if (face === 1) { x = -w; y = u; z = v; } else if (face === 2) { x = u; y = w; z = v; }
+            else if (face === 3) { x = u; y = -w; z = v; } else if (face === 4) { x = u; y = v; z = w; } else { x = u; y = v; z = -w; }
+            return { x, y, z };
+        }
+        function getHeartPoint(i, count) {
+            const t = (i / count) * Math.PI * 2;
+            const phi = (i / count) * Math.PI * 50;
+            let x = 16 * Math.pow(Math.sin(t), 3);
+            let y = 13 * Math.cos(t) - 5 * Math.cos(2 * t) - 2 * Math.cos(3 * t) - Math.cos(4 * t);
+            let z = 2 * Math.sin(phi) * Math.sin(t);
+            return { x: x * 0.5, y: y * 0.5, z: z * 0.5 };
+        }
+        function getSaturnPoint(i, count) {
+            const isRing = i > count * 0.65;
+            if (isRing) {
+                const angle = (i / count) * Math.PI * 20;
+                const r = 10 + Math.random() * 5;
+                return { x: r * Math.cos(angle), y: (Math.random() - 0.5) * 0.5, z: r * Math.sin(angle) };
+            } else {
+                const phi = Math.acos(-1 + (2 * i) / (count * 0.65));
+                const theta = Math.sqrt(count * Math.PI) * phi;
+                const r = 6;
+                return { x: r * Math.cos(theta) * Math.sin(phi), y: r * Math.sin(theta) * Math.sin(phi), z: r * Math.cos(phi) };
+            }
+        }
+
+
+        const videoElement = document.getElementById('input_video');
+
+        function onResults(results) {
+            document.getElementById('loading').style.display = 'none';
+
+            const landmarks = results.multiHandLandmarks;
+            state.handsDetected = landmarks ? landmarks.length : 0;
+
+            if (state.handsDetected > 0) {
+
+                const h1 = landmarks[0];
+                const h1Index = h1[8]; const h1Thumb = h1[4];
+
+
+                state.rotation.x += (h1[9].x - state.rotation.x) * 0.1;
+                state.rotation.y += (h1[9].y - state.rotation.y) * 0.1;
+
+
+                const pinchDist = Math.hypot(h1Index.x - h1Thumb.x, h1Index.y - h1Thumb.y);
+                const targetPinch = 1 - Math.min(Math.max((pinchDist - 0.02) / 0.15, 0), 1);
+                state.pinchStrength += (targetPinch - state.pinchStrength) * 0.2;
+
+
+                const isPeace = h1[8].y < h1[6].y && h1[12].y < h1[10].y && h1[16].y > h1[14].y && h1[20].y > h1[18].y;
+                if (isPeace) {
+                    if (!isPeaceSignLocked && Date.now() - lastGestureTime > 1000) {
+                        currentShapeIndex = (currentShapeIndex + 1) % shapeGenerators.length;
+                        setShape(currentShapeIndex);
+                        lastGestureTime = Date.now();
+                        flashUI();
+                    }
+                    isPeaceSignLocked = true;
+                } else {
+                    isPeaceSignLocked = false;
+                }
+
+
+                const isFist = h1[8].y > h1[6].y && h1[12].y > h1[10].y && h1[16].y > h1[14].y && h1[20].y > h1[18].y;
+                state.isFist = isFist;
+
+                if (state.handsDetected === 2) {
+                    const h2 = landmarks[1];
+
+
+                    const distHands = Math.hypot(h1[0].x - h2[0].x, h1[0].y - h2[0].y);
+
+                    const targetScale = 0.5 + (distHands * 3.0);
+                    state.handDistance += (targetScale - state.handDistance) * 0.1;
+
+
+                    const h1Point = h1[8].y < h1[6].y && h1[12].y > h1[10].y;
+                    const h2Point = h2[8].y < h2[6].y && h2[12].y > h2[10].y;
+
+                    if (h1Point && h2Point) {
+                        state.isDualPointing = true;
+
+                        updateHandVector(state.hand1Pos, h1[8]);
+                        updateHandVector(state.hand2Pos, h2[8]);
+                    } else {
+                        state.isDualPointing = false;
+                    }
+
+                } else {
+
+                    state.handDistance += (1.0 - state.handDistance) * 0.1;
+                    state.isDualPointing = false;
+                }
+
+                updateUI();
+            }
+        }
+
+        function updateHandVector(vec, landmark) {
+            vec.set((landmark.x - 0.5) * 35, -(landmark.y - 0.5) * 25, 0);
+        }
+
+        function updateUI() {
+            let mode = "Idle";
+            if (state.isFist) mode = "💥 EXPLOSION";
+            else if (state.isDualPointing) mode = "⚡ SPLIT CLOUD";
+            else if (state.handsDetected === 2) mode = "👐 ELASTIC SCALE";
+            else if (state.pinchStrength > 0.5) mode = "🤏 IMPLODE";
+            else if (isPeaceSignLocked) mode = "✌️ SWITCH";
+
+            document.getElementById('activeMode').innerText = mode;
+        }
+
+        function flashUI() {
+            const ui = document.getElementById('ui');
+            ui.style.borderColor = "#00ffcc";
+            setTimeout(() => ui.style.borderColor = "#333", 300);
+        }
+
+        const hands = new Hands({ locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}` });
+
+
+        hands.setOptions({ maxNumHands: 2, modelComplexity: 1, minDetectionConfidence: 0.5, minTrackingConfidence: 0.5 });
+        hands.onResults(onResults);
+
+        const cameraFeed = new Camera(videoElement, {
+            onFrame: async () => { await hands.send({ image: videoElement }); },
+            width: 640, height: 480
+        });
+        cameraFeed.start();
+
+
+        const clock = new THREE.Clock();
+
+        function animate() {
+            requestAnimationFrame(animate);
+            const time = clock.getElapsedTime();
+            const posArr = geometry.attributes.position.array;
+            const colArr = geometry.attributes.color.array;
+
+
+            const rotX = (state.rotation.y - 0.5) * 1.5;
+            const rotY = (state.rotation.x - 0.5) * 1.5;
+            particleSystem.rotation.x += (rotX - particleSystem.rotation.x) * 0.05;
+            particleSystem.rotation.y += (rotY - particleSystem.rotation.y) * 0.05;
+
+            particleSystem.scale.setScalar(state.handDistance);
+
+            for (let i = 0; i < PARTICLE_COUNT; i++) {
+                const ix = i * 3, iy = ix + 1, iz = ix + 2;
+
+                let tx = targetPositions[ix];
+                let ty = targetPositions[iy];
+                let tz = targetPositions[iz];
+
+
+                if (state.pinchStrength > 0.05) {
+                    const factor = 1 - state.pinchStrength;
+                    tx *= factor; ty *= factor; tz *= factor;
+                }
+
+
+                if (state.isFist) {
+                    tx *= 5.0; ty *= 5.0; tz *= 5.0;
+                    tx += Math.sin(time * 20 + ix) * 5;
+                }
+
+
+                if (state.isDualPointing) {
+                    let targetHand;
+
+                    if (i % 2 === 0) targetHand = state.hand1Pos;
+                    else targetHand = state.hand2Pos;
+
+                    tx = targetHand.x + (Math.random() - 0.5) * 5;
+                    ty = targetHand.y + (Math.random() - 0.5) * 5;
+                    tz = targetHand.z + (Math.random() - 0.5) * 5;
+                }
+
+                tx += Math.sin(time + posArr[iy] * 0.5) * 0.05;
+                ty += Math.cos(time + posArr[ix] * 0.5) * 0.05;
+
+
+                const speed = state.isDualPointing ? 0.15 : 0.08;
+
+                posArr[ix] += (tx - posArr[ix]) * speed;
+                posArr[iy] += (ty - posArr[iy]) * speed;
+                posArr[iz] += (tz - posArr[iz]) * speed;
+
+
+                if (state.isDualPointing) {
+
+                    if (i % 2 === 0) { colArr[ix] = 0; colArr[iy] = 1; colArr[iz] = 1; }
+                    else { colArr[ix] = 1; colArr[iy] = 0; colArr[iz] = 1; }
+                } else if (state.isFist) {
+                    colArr[ix] = 1; colArr[iy] = 0.5; colArr[iz] = 0;
+                } else {
+
+                    colArr[ix] += (originalColors[ix] - colArr[ix]) * 0.05;
+                    colArr[iy] += (originalColors[iy] - colArr[iy]) * 0.05;
+                    colArr[iz] += (originalColors[iz] - colArr[iz]) * 0.05;
+                }
+            }
+
+            geometry.attributes.position.needsUpdate = true;
+            geometry.attributes.color.needsUpdate = true;
+            renderer.render(scene, camera);
+        }
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        animate();
+    </script>
+</body>
+
+</html>
